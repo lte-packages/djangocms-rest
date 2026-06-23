@@ -169,3 +169,36 @@ class PageListSerializer(BasePageSerializer, BasePageContentMixin):
 
     def to_representation(self, page_content: PageContent) -> dict:
         return self.get_base_representation(page_content)
+
+
+class PageUpdateSerializer(serializers.Serializer):
+    title = serializers.CharField(required=False, allow_blank=True)
+    page_title = serializers.CharField(required=False, allow_blank=True)
+    menu_title = serializers.CharField(required=False, allow_blank=True)
+    meta_description = serializers.CharField(required=False, allow_blank=True)
+    redirect = serializers.CharField(required=False, allow_blank=True)
+    in_navigation = serializers.BooleanField(required=False)
+    soft_root = serializers.BooleanField(required=False)
+    template = serializers.CharField(required=False, allow_blank=True)
+    xframe_options = serializers.CharField(required=False, allow_blank=True)
+    limit_visibility_in_menu = serializers.BooleanField(required=False)
+    login_required = serializers.BooleanField(required=False)
+    application_namespace = serializers.CharField(required=False, allow_blank=True)
+
+    def update(self, instance: PageContent, validated_data: dict) -> PageContent:
+        page = instance.page
+        page_fields = {"login_required", "application_namespace"}
+        content_updates = {key: value for key, value in validated_data.items() if key not in page_fields}
+        page_updates = {key: value for key, value in validated_data.items() if key in page_fields}
+
+        for field, value in content_updates.items():
+            setattr(instance, field, value)
+        if content_updates:
+            instance.save()
+
+        for field, value in page_updates.items():
+            setattr(page, field, value)
+        if page_updates:
+            page.save(update_fields=list(page_updates.keys()))
+
+        return instance

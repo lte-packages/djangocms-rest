@@ -42,6 +42,11 @@ urlpatterns = [
         views.PlaceholderDetailView.as_view(),
         name="placeholder-detail",
     ),
+    path(
+        "<slug:language>/plugins/<int:pk>/",
+        views.PluginDetailView.as_view(),
+        name="plugin-detail",
+    ),
     path("plugins/", views.PluginDefinitionView.as_view(), name="plugin-list"),
     # Menu endpoints
     path("<slug:language>/menu/", create_view_with_url_name(views.MenuView, "menu"), name="menu"),
