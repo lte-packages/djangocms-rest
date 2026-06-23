@@ -293,3 +293,14 @@ class PluginDefinitionSerializer(serializers.Serializer):
             schema["description"] = str(field.help_text)
 
         return schema
+
+
+class TextPluginUpdateSerializer(serializers.Serializer):
+    body = serializers.CharField(required=False, allow_blank=True)
+
+    def update(self, instance: CMSPlugin, validated_data: dict) -> CMSPlugin:
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        if validated_data:
+            instance.save(update_fields=list(validated_data.keys()))
+        return instance

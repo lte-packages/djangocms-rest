@@ -5,15 +5,17 @@ from django.contrib.sites.shortcuts import get_current_site
 from django.urls import reverse
 from django.utils.functional import lazy
 
-from cms.models import Page, PageContent, Placeholder
+from cms.models import CMSPlugin, Page, PageContent, Placeholder
 from cms.utils.conf import get_languages
 from cms.utils.page_permissions import user_can_view_page
+from djangocms_text.models import Text
 from menus.menu_pool import menu_pool
 from menus.templatetags.menu_tags import ShowBreadcrumb, ShowMenu, ShowSubMenu
 
 
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.pagination import LimitOffsetPagination
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -25,9 +27,10 @@ from djangocms_rest.serializers.pages import (
     PageContentSerializer,
     PageListSerializer,
     PageMetaSerializer,
+    PageUpdateSerializer,
 )
 from djangocms_rest.serializers.placeholders import PlaceholderSerializer
-from djangocms_rest.serializers.plugins import PluginDefinitionSerializer
+from djangocms_rest.serializers.plugins import PluginDefinitionSerializer, TextPluginUpdateSerializer
 from djangocms_rest.utils import (
     get_object,
     get_site_filtered_queryset,
@@ -42,6 +45,16 @@ from djangocms_rest.schemas import extend_placeholder_schema, extend_page_search
 # plugin definitions.
 # If you need to update the plugin definitions, you need to reassign the variable.
 PLUGIN_DEFINITIONS = lazy(PluginDefinitionSerializer.generate_plugin_definitions, dict)()
+
+
+def _create_replacement_draft(page_content: PageContent, user):
+    versions = getattr(page_content, "versions", None)
+    if versions is None:
+        return page_content
+    source_version = versions.first()
+    if source_version is None or not hasattr(source_version, "copy"):
+        return page_content
+    return source_version.copy(created_by=user).content
 
 
 class HealthCheckView(APIView):
@@ -142,6 +155,13 @@ class PageTreeListView(BaseAPIView):
 class PageDetailView(BaseAPIView):
     permission_classes = [IsAllowedPublicLanguage, CanViewPage]
     serializer_class = PageContentSerializer
+    http_method_names = ("get", "post", "patch", "options")
+
+    def get_permissions(self):
+        permissions = super().get_permissions()
+        if self.request.method in ("POST", "PATCH"):
+            permissions.insert(0, IsAuthenticated())
+        return permissions
 
     def get(self, request: Request, language: str, path: str = "") -> Response:
         """Retrieve a page instance. The page instance includes the placeholders and
@@ -158,6 +178,85 @@ class PageDetailView(BaseAPIView):
             return Response(serializer.data)
         except PageContent.DoesNotExist:
             raise NotFound()
+
+    def _update(self, request: Request, language: str, path: str = "") -> Response:
+        page = get_object(self.site, path)
+        self.check_object_permissions(request, page)
+
+        try:
+            page_content = page.get_admin_content(language, fallback=True)
+            if not page_content:
+                raise PageContent.DoesNotExist()
+        except PageContent.DoesNotExist:
+            raise NotFound()
+
+        editable_content = _create_replacement_draft(page_content, request.user)
+        serializer = PageUpdateSerializer(editable_content, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        updated_page_content = serializer.save()
+        response_serializer = self.serializer_class(updated_page_content, read_only=True, context={"request": request})
+        return Response(response_serializer.data)
+
+    def post(self, request: Request, language: str, path: str = "") -> Response:
+        return self._update(request, language, path)
+
+    def patch(self, request: Request, language: str, path: str = "") -> Response:
+        return self._update(request, language, path)
+
+
+class PluginDetailView(BaseAPIView):
+    permission_classes = [IsAllowedPublicLanguage]
+    serializer_class = TextPluginUpdateSerializer
+    http_method_names = ("post", "patch", "options")
+
+    def get_permissions(self):
+        permissions = super().get_permissions()
+        permissions.insert(0, IsAuthenticated())
+        return permissions
+
+    def _update(self, request: Request, language: str, pk: int) -> Response:
+        cms_plugin = CMSPlugin.objects.select_related("placeholder").filter(pk=pk, language=language).first()
+        if cms_plugin is None:
+            raise NotFound()
+
+        source = getattr(cms_plugin.placeholder, "source", None)
+        if not isinstance(source, PageContent):
+            raise ValidationError({"detail": "Only page content plugins can be updated."})
+        if not user_can_view_page(request.user, source.page):
+            raise NotFound()
+
+        plugin_instance = cms_plugin.get_bound_plugin()
+        if not isinstance(plugin_instance, Text):
+            raise ValidationError({"detail": "Only text plugins can be updated."})
+
+        draft_content = _create_replacement_draft(source, request.user)
+        draft_placeholder = draft_content.placeholders.filter(slot=cms_plugin.placeholder.slot).first()
+        if draft_placeholder is None:
+            raise NotFound()
+
+        draft_plugin = CMSPlugin.objects.filter(
+            placeholder=draft_placeholder,
+            language=cms_plugin.language,
+            position=cms_plugin.position,
+            plugin_type=cms_plugin.plugin_type,
+        ).first()
+        if draft_plugin is None:
+            raise NotFound()
+
+        draft_plugin_instance = draft_plugin.get_bound_plugin()
+        if not isinstance(draft_plugin_instance, Text):
+            raise ValidationError({"detail": "Only text plugins can be updated."})
+
+        serializer = self.serializer_class(draft_plugin_instance, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def post(self, request: Request, language: str, pk: int) -> Response:
+        return self._update(request, language, pk)
+
+    def patch(self, request: Request, language: str, pk: int) -> Response:
+        return self._update(request, language, pk)
 
 
 class PlaceholderDetailView(BaseAPIView):
